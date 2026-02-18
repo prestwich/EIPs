@@ -2,7 +2,7 @@
 eip: XXXX
 title: Native Key Delegation for EOAs
 description: Allows EOAs to permanently replace ECDSA with alternative signature schemes via an extended delegation designator.
-author: Gregory Markou (@GregTheGreek) <gregorymarkou@gmail.com>, James Prestwich (@prestwich) <james@prestwi.ch>
+author: Gregory Markou (@GregTheGreek) <gregorymarkou@gmail.com>, James Prestwich (@prestwich) <james@prestwi.ch>, Samwise (@init4samwise)
 discussions-to: TBD
 status: Draft
 type: Standards Track
@@ -270,10 +270,43 @@ The `authority` address is deterministic given `(chain_id, pk, r, s,
 y_parity)`, enabling counterfactual address computation and pre-funding before
 the Type `0x05` transaction is submitted.
 
-**Recommended construction for `r`:** Compute `r_seed = keccak256("nkd-v1" ||
-chain_id || pk)`, then find the smallest valid secp256k1 x-coordinate ≥
-`r_seed mod p`. Set `s = 1`. This makes the derivation publicly verifiable:
-anyone can reproduce the computation and confirm that no trapdoor was used.
+**Recommended construction for `r`:** The following algorithm produces a
+deterministic, verifiable `r` value:
+
+```
+function derive_r(chain_id: uint256, pk: bytes32) -> (r: uint256, y_parity: uint8):
+    # Encode chain_id as 32-byte big-endian, pk as raw 32 bytes
+    r_seed = keccak256(b"nkd-v1" || to_be_bytes(chain_id, 32) || pk)
+    candidate = r_seed mod p  # p = secp256k1 field prime
+    
+    # Find smallest valid x-coordinate >= candidate
+    while True:
+        if is_valid_x(candidate):  # candidate^3 + 7 is a quadratic residue mod p
+            r = candidate
+            # Select y_parity = 0 (even y) for determinism
+            y_parity = 0
+            return (r, y_parity)
+        candidate = (candidate + 1) mod p
+
+# Set s = 1 for simplicity and verifiability
+s = 1
+```
+
+Where `p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F`
+(the secp256k1 field prime). This construction is deterministic and publicly
+verifiable: anyone can reproduce the computation and confirm that no trapdoor
+was used.
+
+**Reference address derivation:**
+
+```
+function derive_keyless_address(chain_id: uint256, pk: bytes32) -> address:
+    (r, y_parity) = derive_r(chain_id, pk)
+    s = 1
+    msg_hash = keccak256(0x07 || rlp([chain_id, pk, 0]))
+    authority = ecrecover(msg_hash, y_parity, r, s)
+    return authority
+```
 
 #### Transaction Origination
 
@@ -477,8 +510,31 @@ contract deployment.
 ## Test Cases
 
 Test cases are required for consensus-affecting changes and will be provided in
-`assets/eip-XXXX/` before this EIP advances beyond Draft status. Key scenarios
-to cover:
+`assets/eip-XXXX/` before this EIP advances beyond Draft status.
+
+### Deterministic Address Derivation Test Vector
+
+For the crafted-signature keyless account creation method:
+
+| Input | Value |
+|-------|-------|
+| `chain_id` | `1` (Ethereum mainnet) |
+| `pk` (Ed25519 pubkey) | `0x3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29` |
+
+| Derived Value | Result |
+|---------------|--------|
+| `r_seed` | `keccak256(b"nkd-v1" \|\| 0x0...01 \|\| pk)` |
+| `r` | First valid secp256k1 x-coordinate ≥ `r_seed mod p` |
+| `s` | `1` |
+| `y_parity` | `0` |
+| `msg_hash` | `keccak256(0x07 \|\| rlp([1, pk, 0]))` |
+| `authority` | `ecrecover(msg_hash, 0, r, 1)` |
+
+Implementations MUST produce identical `authority` addresses for the same
+`(chain_id, pk)` inputs. A comprehensive test vector suite with precomputed
+values will be provided in `assets/eip-XXXX/test-vectors.json`.
+
+### Key scenarios to cover:
 
 - Type `0x05` in ECDSA mode with a single native key authorization tuple.
 - Type `0x05` in ECDSA mode with a crafted-signature (keyless) authorization.
